@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rutefabric Communication</title>
+    <script src="/socket.io/socket.io.js"></script>
+   
+    <style>
+
+        #chatContainer {
+            display: flex;
+            flex-direction: column; 
+            justify-content: flex-start; 
+            height: 75vh;
+            padding: 10px;
+            border: 1px solid #faf7f7;
+            background-color: #eeebea;
+            overflow-y: auto; 
+            scroll-behavior: smooth;
+        }
+    
+        
+        .message {
+            display: inline-block;
+            padding: 10px;
+            border-radius: 10px;
+            margin-bottom: 10px;
+            max-width: 60%;
+            word-wrap: break-word;
+        }
+    
+        #logoImage {
+            width: 250px;
+            height: auto;
+        }
+    
+        
+        .sent {
+            background-color: #c2ced7;
+            align-self: flex-end;
+            text-align: right;
+            border: 1px solid #120707;
+        }
+    
+        
+        .received {
+            background-color: #fff;
+            align-self: flex-start;
+            text-align: left;
+            border: 1px solid #120707;
+        }
+    
+        audio, video {
+            display: block;
+            margin-top: 5px;
+            max-width: 100%;
+        }
+    
+        img, a.file-link {
+            display: block;
+            margin-top: 5px;
+            max-width: 100%;
+            word-wrap: break-word;
+        }
+    
+        form {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+        }
+    
+        input[type="text"], input[type="file"] {
+            width: 70%;
+            padding: 10px;
+            border-radius: 20px;
+            border: 1px solid #ccc;
+            outline: none;
+        }
+    
+        button {
+            padding: 8px 12px;
+            border-radius: 10px;
+            border: #120707;
+            background-color: #2885e8;
+            color: white;
+            cursor: pointer;
+            margin-top: 5px;
+        }
+    
+        button:disabled {
+            background-color: #ccc;
+        }
+    
+        #chatContainer::-webkit-scrollbar {
+            width: 8px;
+        }
+    
+        #chatContainer::-webkit-scrollbar-thumb {
+            background: #ccc;
+            border-radius: 4px;
+        }
+    
+       
+        .record-btn {
+            margin-left: 10px;
+        }
+
+    </style>
+    
+    
+
+</head>
+<body>
+    <img src="RF-Logo.png" alt="RouteFabric Logo" id="logoImage">
+    <div id="chatContainer"></div>
+
+    <form id="messageForm">
+        <input id="messageInput" type="text" autocomplete="off" placeholder="Type your message..." />
+        <input id="fileInput" type="file" style="margin-left: 10px;" />
+        <button type="submit">Send</button>
+    </form>
+
+    <div>
+        <button id="audioRecordBtn" class="record-btn">Record Audio</button>
+        <button id="stopAudioBtn" class="record-btn" disabled>Stop Audio</button>
+        <button id="videoRecordBtn" class="record-btn">Record Video</button>
+        <button id="stopVideoBtn" class="record-btn" disabled>Stop Video</button>
+    </div>
+
+
+    <script>
+    const socket = io();
+    let username = localStorage.getItem('username');
+    let chatContainer = document.getElementById('chatContainer');
+
+    function setUsername() {
+        while (!username) {
+            username = prompt("Enter your username:");
+            if (username) {
+                localStorage.setItem('username', username);
+            }
+        }
+    }
+
+    setUsername();
+
+    const messageForm = document.getElementById('messageForm');
+    const messageInput = document.getElementById('messageInput');
+    const fileInput = document.getElementById('fileInput');
+    const audioRecordBtn = document.getElementById('audioRecordBtn');
+    const stopAudioBtn = document.getElementById('stopAudioBtn');
+    const videoRecordBtn = document.getElementById('videoRecordBtn');
+    const stopVideoBtn = document.getElementById('stopVideoBtn');
+
+    let audioRecorder, videoRecorder;
+    let audioChunks = [];
+    let videoChunks = [];
+    let messageOffset = 0; 
+    const messageBatchSize = 20; 
+
+    
+    let db;
+    const dbName = "chatDatabase";
+    const dbVersion = 1;
+
+    function openDatabase() {
+        const request = indexedDB.open(dbName, dbVersion);
+
+        request.onupgradeneeded = (event) => {
+            db = event.target.result;
+            if (!db.objectStoreNames.contains('messages')) {
+                db.createObjectStore('messages', { keyPath: 'id', autoIncrement: true });
+            }
+        };
+
+        request.onsuccess = (event) => {
+            db = event.target.result;
+            loadChatHistory(); 
+        };
+
+        request.onerror = (event) => {
+            console.error("IndexedDB error:", event.target.errorCode);
+        };
+    }
+
+    
+    function saveMessageToDB(message) {
+        const transaction = db.transaction(['messages'], 'readwrite');
+        const store = transaction.objectStore('messages');
+        store.add(message);
+    }
+
+   
+    function loadChatHistory(isScroll = false) {
+        const transaction = db.transaction(['messages'], 'readonly');
+        const store = transaction.objectStore('messages');
+
+        const request = store.openCursor(null, 'prev');
+        let loadedMessages = 0;
+        let oldScrollHeight = chatContainer.scrollHeight;
+
+        request.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (cursor && loadedMessages < messageBatchSize) {
+                
+                if (loadedMessages >= messageOffset) {
+                    appendMessage(cursor.value.content, cursor.value.messageType, true); 
+                    loadedMessages++;
+                }
+                cursor.continue();
+            }
+
+            if (loadedMessages === messageBatchSize) {
+                messageOffset += loadedMessages; 
+            }
+
+            if (isScroll) {
+                chatContainer.scrollTop = chatContainer.scrollHeight - oldScrollHeight; 
+            }
+        };
+
+        request.onerror = (event) => {
+            console.error("Failed to load chat history:", event.target.errorCode);
+        };
+    }
+
+    const displayedMessages = new Set(); 
+
+
+function loadMessages() {
+    const messages = JSON.parse(localStorage.getItem('chatMessages')) || [];
+    messages.forEach(({ content, type }) => {
+        appendMessage(content, type);
+    });
+}
+
+
+function saveMessage(content, type) {
+    const messages = JSON.parse(localStorage.getItem('chatMessages')) || [];
+    messages.push({ content, type });
+    localStorage.setItem('chatMessages', JSON.stringify(messages));
+}
+
+
+function appendMessage(content, messageType) {
+    
+    if (!displayedMessages.has(content)) {
+        const messageElement = document.createElement('div');
+        messageElement.classList.add('message', messageType);
+        messageElement.innerHTML = content;
+        chatContainer.appendChild(messageElement);
+        chatContainer.scrollTop = chatContainer.scrollHeight; 
+
+        
+        displayedMessages.add(content);
+
+        
+        saveMessage(content, messageType);
+    }
+}
+
+loadMessages();
+
+    
+    messageForm.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const message = messageInput.value;
+        const file = fileInput.files[0];
+
+        if (message.trim()) {
+            socket.emit('textMessage', { message, user: username });
+            messageInput.value = '';
+        }
+
+        if (file) {
+            const reader = new FileReader();
+            reader.onload = function (event) {
+                const fileData = event.target.result;
+                socket.emit('fileMessage', { file: fileData, fileName: file.name, user: username });
+            };
+            reader.readAsDataURL(file);
+            fileInput.value = ''; 
+        }
+    });
+
+   
+    audioRecordBtn.addEventListener('click', async () => {
+        audioChunks = [];
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        audioRecorder = new MediaRecorder(stream);
+
+        audioRecorder.ondataavailable = (event) => {
+            audioChunks.push(event.data);
+        };
+
+        audioRecorder.onstop = () => {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+            
+            
+            const reader = new FileReader();
+            reader.onloadend = function() {
+                const base64data = reader.result;
+                socket.emit('audioMessage', { audio: base64data, user: username });
+            };
+            reader.readAsDataURL(audioBlob); 
+        };
+
+        audioRecorder.start();
+        audioRecordBtn.disabled = true;
+        stopAudioBtn.disabled = false;
+    });
+
+    stopAudioBtn.addEventListener('click', () => {
+        audioRecorder.stop();
+        audioRecordBtn.disabled = false;
+        stopAudioBtn.disabled = true;
+    });
+
+    
+    videoRecordBtn.addEventListener('click', async () => {
+        videoChunks = [];
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        videoRecorder = new MediaRecorder(stream);
+
+        videoRecorder.ondataavailable = (event) => {
+            videoChunks.push(event.data);
+        };
+
+        videoRecorder.onstop = () => {
+            const videoBlob = new Blob(videoChunks, { type: 'video/webm' });
+            
+            
+            const reader = new FileReader();
+            reader.onloadend = function() {
+                const base64data = reader.result;
+                socket.emit('videoMessage', { video: base64data, user: username });
+            };
+            reader.readAsDataURL(videoBlob); 
+        };
+
+        videoRecorder.start();
+        videoRecordBtn.disabled = true;
+        stopVideoBtn.disabled = false;
+    });
+
+    stopVideoBtn.addEventListener('click', () => {
+        videoRecorder.stop();
+        videoRecordBtn.disabled = false;
+        stopVideoBtn.disabled = true;
+    });
+
+ 
+socket.on('textMessage', (data) => {
+    const isOwnMessage = data.user === username;
+    appendMessage(`<strong>${isOwnMessage ? 'You' : data.user}:</strong> ${data.message}`, isOwnMessage ? 'sent' : 'received');
+});
+
+
+socket.on('fileMessage', (data) => {
+    const isOwnMessage = data.user === username;
+    const fileMessageContent = `<strong>${isOwnMessage ? 'You' : data.user}:</strong> <a href="${data.file}" download="${data.fileName}" class="file-link">${data.fileName}</a>`;
+    appendMessage(fileMessageContent, isOwnMessage ? 'sent' : 'received');
+});
+
+
+socket.on('audioMessage', (data) => {
+    const isOwnMessage = data.user === username;
+    const audioElement = `<audio controls src="${data.audio}"></audio>`;
+    appendMessage(`<strong>${isOwnMessage ? 'You' : data.user}:</strong> ${audioElement}`, isOwnMessage ? 'sent' : 'received');
+});
+
+
+socket.on('videoMessage', (data) => {
+    const isOwnMessage = data.user === username;
+    const videoElement = `<video controls src="${data.video}"></video>`;
+    appendMessage(`<strong>${isOwnMessage ? 'You' : data.user}:</strong> ${videoElement}`, isOwnMessage ? 'sent' : 'received');
+});
+
+   
+    
+    openDatabase();
+
+    
+    chatContainer.addEventListener('scroll', () => {
+        if (chatContainer.scrollTop === 0) {
+            loadChatHistory(true); 
+        }
+    });
+
+</script>
+
+</body>
+</html>
